@@ -1,7 +1,7 @@
 ---
 layout: post
-title: "Welcome to Millennial!"
-author: "Paul Le"
+title: "Welcome to Summer_Sea!"
+author: "Li3ar"
 categories: documentation
 tags: [documentation,sample]
 image: cuba-1.jpg
