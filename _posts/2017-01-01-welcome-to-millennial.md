@@ -1,42 +1,125 @@
 ---
 layout: post
-title: "Welcome to Summer_Sea!"
-author: "Li3ar"
+title: "Java RASP Hook技术原理分析"
+author: "Liar C"
 categories: documentation
 tags: [documentation,sample]
-image: cuba-1.jpg
+image: soni.jpg
 ---
 
-Millennial is a minimalist Jekyll theme. The purpose of this theme is to provide a simple, clean, content-focused blogging platform for your personal site or blog. Below you can find everything you need to get started.
+# Java RASP Hook技术原理分析
 
-## Getting Started
+## 关于rasp
+在2014年的时候，Gartner引入了“Runtime application self-protection”一词，简称为RASP。它是一种新型应用安全保护技术，RASP技术可以快速的将安全防御功能整合到正在运行的应用程序中，它拦截从应用程序到系统的所有调用，能实时检测和阻断安全攻击，使应用程序具备自我保护能力。
 
-[Getting Started]({{ site.github.url }}{% post_url 2016-10-10-getting-started %}): getting started with installing Millennial, whether you are completely new to using Jekyll, or simply just migrating to a new Jekyll theme.
+*官方的rasp技术图*
+![](media/15748432951455/15748434927147.jpg)
 
-## Example Content
+## rasp技术实现原理
 
-[Text and Formatting]({{ site.github.url }}{% post_url 2016-09-09-text-formatting %})
+对危险的底层函数进行hook。当HOOK住的危险函数被调用之后，触发检测逻辑。
+Rasp技术的本质就是如何实现这样一个HOOK动作的agent。
+java中，通过java agent的方式进行实现。
+### javaagent加载机制
 
-## Questions?
+在jvm启动的时候可通过-javaagent参数来执行agent代理。agent代理运用instrument技术，可直接修改jvm中加载的字节码的内容。
+*修改字节码的技术*（asm、javassist rasp使用javassist）
+- 简单的Agent
+通常agent的包里面MATE-INF目录下的**MANIFEST.MF**中会通过“**Premain-Class**:”声明Agent类：
+```
+Manifest-Version: 1.0
+Premain-Class: cn.org.javaweb.agent.Agent
+Can-Retransform-Classes: true
+Can-Redefine-Classes: true
+Can-Set-Native-Method-Prefix: true
+```
+**Agent.class**
 
-This theme is completely free and open source software. You may use it however you want, as it is distributed under the [MIT License](http://choosealicense.com/licenses/mit/). If you are having any problems, any questions or suggestions, feel free to [tweet at me](https://twitter.com/intent/tweet?text=My%20question%20about%20Millennial;via=paululele), or [file a GitHub issue](https://github.com/lenpaul/Millennial/issues/new).
+```
+import java.lang.instrument.Instrumentation;
+public class Agent {
+    public static void premain(String agentArgs, Instrumentation inst) {
+        inst.addTransformer(new AgentTransform());
+    }
+}
+```
+**AgentTransform.class**
+```
+import java.lang.instrument.ClassFileTransformer;
+import java.lang.instrument.IllegalClassFormatException;
+import java.security.ProtectionDomain;
+import org.objectweb.asm.*;
+public class AgentTransform implements ClassFileTransformer{
+    @Override
+    public byte[] transform(ClassLoader loader, String className,
+                            Class<?> classBeingRedefined, ProtectionDomain protectionDomain,
+                            byte[] classfileBuffer) throws IllegalClassFormatException {
+        className = className.replace("/", ".");
+        try {
+            if (className.contains("ProcessBuilder")) {
+                System.out.println("Load class: " + className);
+            }
 
-## More Jekyll!
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
 
-### Lagrange
+        return classfileBuffer;
+    }
+}
+```
+![](media/15748432951455/15748457225335.jpg)
 
-Lagrange is a minimalist Jekyll blog theme that I built from scratch. The purpose of this theme is to provide a simple, clean, content-focused blogging platform for your personal site or blog.
+## 跟踪rasp代码分析加载的agent做了哪些工作
 
-Feel free to check out <a href="https://lenpaul.github.io/Lagrange/" target="_blank">the demo</a>, where you’ll also find instructions on <a href="https://lenpaul.github.io/Lagrange/journal/getting-started.html">how to use install</a> and use the theme.
+- 加载原生类库
+![](media/15748432951455/15748458048486.jpg)
 
-### Portfolio Jekyll Theme
+- 加载插件
+以json形式读取plugins目录下的js插件文件，其中描述了针对各种攻击类型的处理方法和手段（包括“log，block，ignore”）等
+如官方插件official.js
+![](media/15748432951455/15748470459971.jpg)
+- 初始化checkers
+包含各种攻击类型以及对应的checker
+![](media/15748432951455/15748471210433.jpg)
+*其中V8Checker是原生库代码*
 
-This is a Jekyll theme built using the [DevTips Starter Kit](http://devtipsstarterkit.com/) as a foundation for starting, and following closely the amazing tutorial by [Travis Neilson over at DevTips](https://www.youtube.com/watch?v=T6jKLsxbFg4&list=PL0CB3OvPhDA_STygmp3sDenx3UpdOMk7P). The purpose of this theme is to provide a clean and simple website for your portfolio. Emphasis is placed on your projects, which are shown front and center on the home page.
+- initTransformer(inst)——agent的核心工作区
+这里做了两件事：
+1. 根据前面加载的js插件文件标记出hook点（即根据攻击类型标记的危险的底层方法），剔除js文件中“ignore”修饰的hook点
+![](media/15748432951455/15749313951651.jpg)
+在java rasp的样例中，包含以下75种hook类型（sql注入、文件写入、weblogic反序列化等）
+![](media/15748432951455/15749317578607.jpg)
 
-Everything that you will ever need to know about this Jekyll theme is included in [the repository](https://github.com/LeNPaul/portfolio-jekyll-theme), which you can also find in [the demo site](https://lenpaul.github.io/portfolio-jekyll-theme/).
+2. 利用javassist技术修改字节码
+   遍历当前jvm加载的所有class，当与hook的类匹配时，调用com.baidu.openrasp.transformer.CustomClassTransformer的transform方法，利用javassist在hook的恶意方法前写入自定义方法（log或block操作）
+   ![](media/15748432951455/15749315322623.jpg)
 
-### Jekyll Starter Kit
+**整个流程图如下**
+![](media/15748432951455/15749317878949.jpg)
 
-The Jekyll Starter Kit is a simple framework for starting your own Jekyll project using all of the best practices that I learned from building my other Jekyll themes.
+## 利用rasp报警漏洞实际案例
 
-Feel free to check out <a href="https://github.com/LeNPaul/jekyll-starter-kit" target="_blank">the GitHub repository</a>, where you’ll also find instructions on how to use install and use the theme.
+### 攻击类型：命令执行（command_userinput）
+
+js插件种定义如下：
+![](media/15748432951455/15749320212023.jpg)
+与之相对应的Hook类为com.baidu.openrasp.hook.system.ProcessBuilderHook
+调用com.baidu.openrasp.hook.system.ProcessBuilderHook的hookMethod方法，通过javassist修改原字节码：
+![](media/15748432951455/15749320779587.jpg)
+**hook成功**
+![](media/15748432951455/15749321015856.jpg)
+![](media/15748432951455/15749331181757.jpg)
+![](media/15748432951455/15749331338478.jpg)
+
+![](media/15748432951455/15749330949898.jpg)
+
+**rasp可自定义插件，具体可参考[官方文档](https://rasp.baidu.com/doc/install/compat.html)**
+## rasp目前支持安装在Weblogic、jetty服务器、tomcat服务器中
+
+参考：
+https://rasp.baidu.com/doc/install/software.html
+https://zhuanlan.zhihu.com/p/27826357
+https://www.freebuf.com/articles/web/197823.html
+
+
